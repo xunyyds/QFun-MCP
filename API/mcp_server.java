@@ -79,7 +79,34 @@ void startServer() {
         try {
             c = ss.accept();
             c.setSoTimeout(20000);
-            handleConn(c);
+            synchronized (activeMcpConnections) {
+                if (activeMcpConnections[0] >= 4) {
+                    writeResp(c.getOutputStream(), 503, "application/json; charset=utf-8", "{\"error\":\"server_busy\",\"message\":\"并发请求已达上限，请稍后重试\"}");
+                    continue;
+                }
+                activeMcpConnections[0]++;
+            }
+            final Socket client = c;
+            try {
+                new Thread(new Runnable() {
+                    public void run() {
+                        try {
+                            handleConn(client);
+                        } finally {
+                            try { client.close(); } catch (Exception e) {}
+                            synchronized (activeMcpConnections) {
+                                activeMcpConnections[0] = Math.max(0, activeMcpConnections[0] - 1);
+                            }
+                        }
+                    }
+                }, "QFun-MCP-connection").start();
+                c = null;
+            } catch (Exception e) {
+                synchronized (activeMcpConnections) {
+                    activeMcpConnections[0] = Math.max(0, activeMcpConnections[0] - 1);
+                }
+                throw e;
+            }
         } catch (Exception e) {
             if (serverOn[0]) log("/Log/mcp.txt", "连接异常: " + e.getMessage());
         } finally {
@@ -91,8 +118,12 @@ void startServer() {
 void handleConn(Socket c) {
     try {
         InputStream in = c.getInputStream();
+        OutputStream out = c.getOutputStream();
         String head = readHead(in);
-        if (head == null || head.length() == 0) return;
+        if (head == null || head.length() == 0) {
+            writeResp(out, 400, "application/json; charset=utf-8", "{\"error\":\"invalid_headers\"}");
+            return;
+        }
         String[] lines = head.split("\\r?\\n");
         if (lines.length == 0) return;
         String[] parts = lines[0].split(" ");
@@ -101,31 +132,50 @@ void handleConn(Socket c) {
         HashMap hdrs = new HashMap();
         for (int i = 1; i < lines.length; i++) {
             int idx = lines[i].indexOf(":");
-            if (idx > 0) {
-                hdrs.put(lines[i].substring(0, idx).trim().toLowerCase(), lines[i].substring(idx + 1).trim());
-            }
+            if (idx > 0) hdrs.put(lines[i].substring(0, idx).trim().toLowerCase(), lines[i].substring(idx + 1).trim());
         }
-        int len = 0;
-        try { len = Integer.parseInt((String) hdrs.get("content-length")); } catch (Exception e) {}
-        String body = "";
-        if (len > 0) body = readBody(in, len);
-        OutputStream out = c.getOutputStream();
-
         if ("OPTIONS".equals(method)) { writeResp(out, 204, "", ""); return; }
         if ("GET".equals(method)) { writeResp(out, 405, "text/plain; charset=utf-8", "Method Not Allowed: use POST " + path); return; }
-        if ("DELETE".equals(method)) { writeResp(out, 200, "application/json", "{}"); return; }
+        if ("DELETE".equals(method)) { writeResp(out, 200, "application/json; charset=utf-8", "{}"); return; }
         if (!"POST".equals(method)) { writeResp(out, 405, "text/plain; charset=utf-8", "Method Not Allowed"); return; }
 
         String tok = getToken();
-        if (tok.length() > 0 && !"none".equalsIgnoreCase(tok)) {
+        if (tok == null || tok.length() == 0) {
+            addCall("[auth]", "", false, 0, "Token 配置不可用，已拒绝请求");
+            writeResp(out, 500, "application/json; charset=utf-8", "{\"error\":\"token_unavailable\"}");
+            return;
+        }
+        if (!"none".equalsIgnoreCase(tok)) {
             String auth = (String) hdrs.get("authorization");
-            if (auth == null || !auth.contains(tok)) {
+            String supplied = auth == null ? "" : auth.trim();
+            if (supplied.length() < 7 || !supplied.regionMatches(true, 0, "Bearer ", 0, 7) || !tok.equals(supplied.substring(7).trim())) {
                 addCall("[auth]", "", false, 0, "未授权请求被拒绝");
                 writeResp(out, 401, "application/json; charset=utf-8", "{\"error\":\"unauthorized\"}");
                 return;
             }
         }
 
+        int len = 0;
+        String lengthHeader = (String) hdrs.get("content-length");
+        try {
+            if (lengthHeader != null) len = Integer.parseInt(lengthHeader.trim());
+        } catch (Exception e) {
+            writeResp(out, 400, "application/json; charset=utf-8", "{\"error\":\"invalid_content_length\"}");
+            return;
+        }
+        if (len <= 0) {
+            writeResp(out, 400, "application/json; charset=utf-8", "{\"error\":\"empty_body\"}");
+            return;
+        }
+        if (len > 1048576) {
+            writeResp(out, 413, "application/json; charset=utf-8", "{\"error\":\"body_too_large\",\"max_bytes\":1048576}");
+            return;
+        }
+        String body = readBody(in, len);
+        if (body == null || body.getBytes("UTF-8").length != len) {
+            writeResp(out, 400, "application/json; charset=utf-8", "{\"error\":\"incomplete_body\"}");
+            return;
+        }
         String resp = routeReq(body);
         if (resp == null) writeResp(out, 202, "", "");
         else writeResp(out, 200, "application/json; charset=utf-8", resp);
@@ -137,7 +187,7 @@ void handleConn(Socket c) {
 String routeReq(String body) {
     try {
         String b = body == null ? "" : body.trim();
-        if (b.length() == 0) return errResp(null, -32700, "Parse error: empty body");
+        if (b.length() == 0) return errResp(null, -32700, "Parse error: empty body").toString();
         if (b.startsWith("[")) {
             JSONArray arr = new JSONArray(b);
             JSONArray out = new JSONArray();
@@ -152,7 +202,7 @@ String routeReq(String body) {
         if (res == null) return null;
         return res.toString();
     } catch (Exception e) {
-        return errResp(null, -32700, "Parse error: " + e.getMessage());
+        return errResp(null, -32700, "Parse error: " + e.getMessage()).toString();
     }
 }
 
@@ -200,7 +250,7 @@ JSONObject doInitialize(JSONObject params) {
         si.put("name", "qfun-mcp");
         si.put("version", "1.1.0");
         o.put("serverInfo", si);
-        o.put("instructions", "QFun MCP: uin 为好友QQ号或群号; chat_type 1=私聊 2=群聊 100=陌生人; 文本支持 [atUin=QQ] 与 [pic=url或路径]; 可用工具由手机端面板控制");
+        o.put("instructions", "QFun MCP: uin 为好友QQ号或群号; chat_type 1=私聊 2=群聊 100=陌生人; 文本支持 [atUin=QQ] 与 [pic=url或路径]; tools/call 尽可能返回 structuredContent; run_script 支持 timeout_seconds，脚本端上限默认30秒; 可用工具由手机端面板控制");
         return o;
     } catch (Exception e) {
         return new JSONObject();
@@ -236,6 +286,7 @@ String readHead(InputStream in) {
         int same = 0;
         int b = in.read();
         while (b != -1) {
+            if (bos.size() >= 16384) return null;
             bos.write(b);
             if (b == 10) {
                 same++;
@@ -260,9 +311,10 @@ String readBody(InputStream in, int len) {
             if (n <= 0) break;
             got += n;
         }
+        if (got != len) return null;
         return new String(buf, 0, got, "UTF-8");
     } catch (Exception e) {
-        return "";
+        return null;
     }
 }
 
@@ -293,6 +345,8 @@ String statusText(int code) {
     if (code == 400) return "Bad Request";
     if (code == 401) return "Unauthorized";
     if (code == 405) return "Method Not Allowed";
+    if (code == 413) return "Payload Too Large";
     if (code == 500) return "Internal Server Error";
+    if (code == 503) return "Service Unavailable";
     return "OK";
 }

@@ -2,6 +2,9 @@ boolean[] serverOn = new boolean[1];
 ServerSocket[] serverSock = new ServerSocket[1];
 String[] serverAddr = new String[1];
 ArrayList callLog = new ArrayList();
+boolean[] runScriptBusy = new boolean[1];
+int runScriptMaxTimeoutSeconds = 30;
+int[] activeMcpConnections = new int[1];
 
 String rootPath = pluginPath + "/API/";
 
