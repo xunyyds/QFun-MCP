@@ -33,12 +33,28 @@ String argStr(JSONObject a, String k, String d) {
     }
 }
 
+long numToLong(Object v, long d) {
+    try {
+        if (v == null || v == JSONObject.NULL) return d;
+        if (v instanceof Long) return ((Long) v).longValue();
+        if (v instanceof Integer) return ((Integer) v).longValue();
+        if (v instanceof Short) return ((Short) v).longValue();
+        if (v instanceof Byte) return ((Byte) v).longValue();
+        if (v instanceof Double) return (long) ((Double) v).doubleValue();
+        if (v instanceof Float) return (long) ((Float) v).floatValue();
+        if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1L : 0L;
+        String s = String.valueOf(v).trim();
+        if (s.length() == 0) return d;
+        if (s.indexOf('.') >= 0 || s.indexOf('e') >= 0 || s.indexOf('E') >= 0) return (long) Double.parseDouble(s);
+        return Long.parseLong(s);
+    } catch (Exception e) {
+        return d;
+    }
+}
+
 long argLong(JSONObject a, String k, long d) {
     try {
-        Object v = a.opt(k);
-        if (v == null || v == JSONObject.NULL) return d;
-        if (v instanceof Number) return ((Number) v).longValue();
-        return Long.parseLong(String.valueOf(v).trim());
+        return numToLong(a.opt(k), d);
     } catch (Exception e) {
         return d;
     }
@@ -67,7 +83,15 @@ boolean isIntegralArg(JSONObject a, String key) {
     try {
         Object v = a.opt(key);
         if (v == null || v == JSONObject.NULL) return false;
-        if (v instanceof Number) return ((Number) v).doubleValue() == ((Number) v).longValue();
+        if (v instanceof Long || v instanceof Integer || v instanceof Short || v instanceof Byte) return true;
+        if (v instanceof Double) {
+            double x = ((Double) v).doubleValue();
+            return x == (long) x;
+        }
+        if (v instanceof Float) {
+            float f = ((Float) v).floatValue();
+            return f == (long) f;
+        }
         Long.parseLong(String.valueOf(v).trim());
         return true;
     } catch (Exception e) {
@@ -138,9 +162,13 @@ Object normalizeResult(Object value, int depth) {
         if (value == null || value == JSONObject.NULL) return JSONObject.NULL;
         if (value instanceof String) return limitString((String) value, 4000);
         if (value instanceof Boolean || value instanceof Integer || value instanceof Long || value instanceof Short || value instanceof Byte) return value;
-        if (value instanceof Number) {
-            double d = ((Number) value).doubleValue();
+        if (value instanceof Double) {
+            double d = ((Double) value).doubleValue();
             return Double.isNaN(d) || Double.isInfinite(d) ? String.valueOf(value) : value;
+        }
+        if (value instanceof Float) {
+            float f = ((Float) value).floatValue();
+            return Float.isNaN(f) || Float.isInfinite(f) ? String.valueOf(value) : value;
         }
         if (value instanceof Character) return String.valueOf(value);
         if (depth >= 3) {
